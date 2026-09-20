@@ -13,6 +13,7 @@
 - Added a wizard for Cathedral Assets Optimizer under patchers and cleanup
 - Added a manual workaround for Nexus sso login
 - Added the option to enable lsfg vk when launching a game including a menu to change lsfg options
+- Added support for Vortex file-based override instructions (vortex_override_instructions.json): setmodtype/copy entries reroute a mod's payload (e.g. No Man's Sky nomanssky-binaries mods install to Binaries/ next to NMS.exe instead of GAMEDATA/MODS) with no manual Router Rule needed
 ### Changes
 - Smaller mods during collection install are added as a batch to remove flashing text as they download/install
 - Rearranged the game configure menu to better fit game options instead of them being in one small box

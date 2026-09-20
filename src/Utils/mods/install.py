@@ -438,6 +438,9 @@ def resolve_direct_files(extract_dir: str) -> list[tuple[str, str, bool]]:
                 continue
             if len(parts) == 1 and first.lower() == "meta.ini":
                 continue
+            # Vortex override manifest: installer metadata, never game content.
+            if parts[-1].lower() == "vortex_override_instructions.json":
+                continue
             result.append((rel, rel, False))
     return result
 
@@ -1933,6 +1936,9 @@ def finish_install(prepared: "PreparedInstall", fomod_selections, *,
 
     cancelled = False
     bain_selected: "list[str] | None" = None
+    # Game-root redirect from vortex_override_instructions.json (None = none,
+    # "" = game root). Consumed by the meta write so deploy uses root routing.
+    vortex_redirect: "str | None" = None
     try:
         if p.is_fomod():
             # Persist the wizard's choices (restored + highlighted next time).
@@ -1949,6 +1955,14 @@ def finish_install(prepared: "PreparedInstall", fomod_selections, *,
             if not ok:
                 log_fn("FOMOD resolve failed - installing all files verbatim.")
                 _copy_tree(p.src_root, dest_root, log_fn, _pp)
+            # Vortex override wins over installer output.
+            try:
+                from Utils.mods.vortex_override import (
+                    apply_override_to_staged_tree)
+                vortex_redirect = apply_override_to_staged_tree(
+                    p.game, str(p.fomod_base), dest_root, log_fn)
+            except Exception as exc:
+                log_fn(f"Vortex override skipped ({exc}).")
         elif p.is_bain():
             # BAIN: merge the selected sub-packages (later ones override earlier),
             # with paths relative to the unwrapped bain_root - mirroring the
@@ -2021,6 +2035,15 @@ def finish_install(prepared: "PreparedInstall", fomod_selections, *,
             if file_list is None:
                 cancelled = True
             else:
+                # Vortex override wins over the staged layout; a redirect also
+                # flags the mod root-folder so deploy targets the game root.
+                try:
+                    from Utils.mods.vortex_override import (
+                        apply_override_to_file_list)
+                    file_list, vortex_redirect = apply_override_to_file_list(
+                        p.game, stage_root, file_list, log_fn)
+                except Exception as exc:
+                    log_fn(f"Vortex override skipped ({exc}).")
                 dest_root.mkdir(parents=True, exist_ok=True)
                 _copy_file_list(file_list, stage_root, dest_root, log_fn, game=p.game)
     finally:
@@ -2063,7 +2086,8 @@ def finish_install(prepared: "PreparedInstall", fomod_selections, *,
                         is_fomod=p.is_fomod(),
                         is_bain=bain_selected is not None,
                         fomod_pending_deps=fomod_pending_deps,
-                        fomod_active_deps=fomod_active_deps)
+                        fomod_active_deps=fomod_active_deps,
+                        root_folder=vortex_redirect is not None)
     # Persist the BAIN sub-package selection (global + profile) so a re-install
     # restores the user's choices (Tk parity).
     if bain_selected is not None:
@@ -2271,6 +2295,7 @@ def install_collection_archive(
     fomod_pending_deps = ""   # unselected-option fileDependency plugins (FOMOD)
     fomod_active_deps = ""    # selected-option fileDependency plugins (FOMOD)
     file_list: "list[tuple[str, str, bool]] | None" = None
+    vortex_redirect: "str | None" = None  # game-root redirect (None = none)
     stage_src_root = str(prepared.extract_dir)   # copier's src root
     cancelled = False
 
@@ -2469,6 +2494,13 @@ def install_collection_archive(
         staging_root.mkdir(parents=True, exist_ok=True)
         if file_list is not None:
             # FOMOD / BAIN produced an explicit src→dst list.
+            try:
+                from Utils.mods.vortex_override import (
+                    apply_override_to_file_list)
+                file_list, vortex_redirect = apply_override_to_file_list(
+                    game, stage_src_root, file_list, log_fn)
+            except Exception as exc:
+                log_fn(f"Vortex override skipped ({exc}).")
             dest_root.mkdir(parents=True, exist_ok=True)
             _copy_file_list(file_list, stage_src_root, dest_root, log_fn, game=game)
         elif prepared.is_bundle():
@@ -2533,6 +2565,13 @@ def install_collection_archive(
                     log_fn(f"Collection install: '{prepared.mod_name}' - "
                            f"stage_file_list produced an EMPTY file list "
                            f"(0 files to copy).")
+                try:
+                    from Utils.mods.vortex_override import (
+                        apply_override_to_file_list)
+                    staged, vortex_redirect = apply_override_to_file_list(
+                        game, stage_src_root, staged, log_fn)
+                except Exception as exc:
+                    log_fn(f"Vortex override skipped ({exc}).")
                 _copy_file_list(staged, stage_src_root, dest_root, log_fn, game=game)
     finally:
         prepared.cleanup()
@@ -2553,7 +2592,8 @@ def install_collection_archive(
                         prebuilt_meta=prebuilt_meta, endorsed=_preserved_endorsed,
                         is_fomod=is_fomod_install,
                         fomod_pending_deps=fomod_pending_deps,
-                        fomod_active_deps=fomod_active_deps)
+                        fomod_active_deps=fomod_active_deps,
+                        root_folder=vortex_redirect is not None)
     # Post-install hooks + flat-staging wrap before the index/modlist commit
     # (headless: dialog-popping hooks stay silent).
     if _run_additional_install_logic(
@@ -3101,7 +3141,8 @@ def _write_install_meta(dest_root: Path, archive: Path, game, log_fn: LogFn,
                         is_fomod: bool = False,
                         is_bain: bool = False,
                         fomod_pending_deps: str = "",
-                        fomod_active_deps: str = "") -> None:
+                        fomod_active_deps: str = "",
+                        root_folder: bool = False) -> None:
     try:
         from Nexus.nexus_meta import (
             write_meta, resolve_nexus_meta_for_archive_domains, NexusModMeta)
@@ -3157,6 +3198,9 @@ def _write_install_meta(dest_root: Path, archive: Path, game, log_fn: LogFn,
                 meta.fomod_active_deps = fomod_active_deps
         if is_bain:
             meta.is_bain = True
+        # A Vortex override redirect needs the root-folder flag for deploy.
+        if root_folder:
+            meta.root_folder = True
         write_meta(meta_path, meta)
         if is_fomod and not fomod_pending_deps:
             _clear_meta_key(meta_path, "fomodPendingDeps")

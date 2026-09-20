@@ -14,5 +14,6 @@ py.install_sources(
   'rename.py',
   'staging.py',
   'versions.py',
+  'vortex_override.py',
   subdir: 'Utils/mods',
 )
